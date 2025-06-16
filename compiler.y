@@ -56,6 +56,7 @@
     bool g_has_error = false;
     FILE *fout = NULL;
     int g_indent_cnt = 0;
+    int g_lbl_counter = 0;    // avoid if-else label conflict
 
     bool HAS_ERROR = false;
     void yyerror (char const *s)
@@ -144,7 +145,7 @@ GlobalStatement
 ;
 
 FunctionDeclStmt
-    : FUNC ID { printf("func: %s\n", $<s_val>2); insert_symbol($<s_val>2, -1, "func", "(V)V"); } '(' ')' '{' { create_symbol(); } StatementList '}' { dump_symbol(0);}
+    : FUNC ID { g_indent_cnt++; printf("func: %s\n", $<s_val>2); insert_symbol($<s_val>2, -1, "func", "(V)V"); } '(' ')' '{' { create_symbol(); } StatementList '}' { g_indent_cnt--; dump_symbol(0);}
 ;
 
 StatementList
@@ -179,7 +180,18 @@ OptionalTypeDecl
 ;
 
 OptionalInit
-    : '=' Expr { $$ = $<s_val>2; }
+    : '=' Expr { 
+        if (strcmp($<s_val>2, "i32") == 0) {
+            CODEGEN("istore %d\n", cur_addr);
+        } else if (strcmp($<s_val>2, "f32") == 0) {
+            CODEGEN("fstore %d\n", cur_addr);
+        } else if (strcmp($<s_val>2, "str") == 0) {
+            CODEGEN("astore %d\n", cur_addr);
+        } else if (strcmp($<s_val>2, "bool") == 0) {
+            CODEGEN("istore %d\n", cur_addr);
+        }
+        $$ = $<s_val>2; 
+    }
     | {$$ = NULL;}
 ;
 
@@ -191,8 +203,30 @@ Type
 ;
 
 FuncCall
-    : PRINT '(' ExprList ')' ';' { printf("PRINT %s\n", $<s_val>3); } 
-    | PRINTLN '(' ExprList ')' ';' { printf("PRINTLN %s\n", $<s_val>3); }
+    : PRINT { CODEGEN("getstatic java/lang/System/out Ljava/io/PrintStream;\n"); } '(' ExprList ')' ';' { 
+        printf("PRINT %s\n", $<s_val>4); 
+        if (strcmp($<s_val>4, "str") == 0) {
+            CODEGEN("invokevirtual java/io/PrintStream/print(Ljava/lang/String;)V\n");
+        } else if (strcmp($<s_val>4, "i32") == 0) {
+            CODEGEN("invokevirtual java/io/PrintStream/print(I)V\n");
+        } else if (strcmp($<s_val>4, "f32") == 0) {
+            CODEGEN("invokevirtual java/io/PrintStream/print(F)V\n");
+        } else if (strcmp($<s_val>4, "bool") == 0) {
+            CODEGEN("invokevirtual java/io/PrintStream/print(Z)V\n");
+        } 
+    } 
+    | PRINTLN { CODEGEN("getstatic java/lang/System/out Ljava/io/PrintStream;\n"); } '(' ExprList ')' ';' {
+        printf("PRINTLN %s\n", $<s_val>4); 
+        if (strcmp($<s_val>4, "str") == 0) {
+            CODEGEN("invokevirtual java/io/PrintStream/println(Ljava/lang/String;)V\n");
+        } else if (strcmp($<s_val>4, "i32") == 0) {
+            CODEGEN("invokevirtual java/io/PrintStream/println(I)V\n");
+        } else if (strcmp($<s_val>4, "f32") == 0) {
+            CODEGEN("invokevirtual java/io/PrintStream/println(F)V\n");
+        } else if (strcmp($<s_val>4, "bool") == 0) {
+            CODEGEN("invokevirtual java/io/PrintStream/println(Z)V\n");
+        } 
+    }
 ;
 
 ExprList
@@ -201,9 +235,28 @@ ExprList
 ;
 
 Expr
-    : Expr LOR Expr {printf("%s\n", "LOR"); $$ = "bool";}
-    | Expr LAND Expr {printf("%s\n", "LAND"); $$ = "bool";}
-    | Expr '>' Expr {check_mismatch($<s_val>1, "GTR", $<s_val>3); printf("%s\n", "GTR"); $$ = "bool"; }
+    : Expr LOR Expr { CODEGEN("ior\n"); printf("%s\n", "LOR"); $$ = "bool";}
+    | Expr LAND Expr {CODEGEN("iand\n"); printf("%s\n", "LAND"); $$ = "bool";}
+    | Expr '>' Expr {
+        check_mismatch($<s_val>1, "GTR", $<s_val>3); 
+        if (strcmp($<s_val>1, "i32") == 0 && strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("if_icmpgt Comp_true_%d\n", g_lbl_counter);
+            CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
+            CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
+        } else if (strcmp($<s_val>1, "f32") == 0 && strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fcmpg\n");
+            CODEGEN("ifgt Comp_true_%d\n", g_lbl_counter);
+            CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
+            CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
+        }
+        CODEGEN("Comp_true_%d:\n", g_lbl_counter);
+        CODEGEN("iconst_1\n");     // if true push 1 (iconst_1 == ldc 1)
+        CODEGEN("Comp_end_%d:\n", g_lbl_counter);
+        g_lbl_counter++;
+        // The above code is for comparison, if true then push 1, else push 0
+        printf("%s\n", "GTR"); 
+        $$ = "bool"; 
+    }
     | Expr '<' Expr {check_mismatch($<s_val>1, "LSS", $<s_val>3); printf("%s\n", "LSS"); $$ = "bool"; }
     | Expr GEQ Expr {check_mismatch($<s_val>1, "GEQ", $<s_val>3); printf("%s\n", "GEQ"); $$ = "bool"; }
     | Expr LEQ Expr {check_mismatch($<s_val>1, "LEQ", $<s_val>3); printf("%s\n", "LEQ"); $$ = "bool"; }
@@ -211,14 +264,65 @@ Expr
     | Expr NEQ Expr {check_mismatch($<s_val>1, "NEQ", $<s_val>3); printf("%s\n", "NEQ"); $$ = "bool"; }
     | Expr LSHIFT Expr {check_mismatch($<s_val>1, "LSHIFT", $<s_val>3); printf("%s\n", "LSHIFT"); $$ = "bool"; }
     | Expr RSHIFT Expr {check_mismatch($<s_val>1, "RSHIFT", $<s_val>3); printf("%s\n", "RSHIFT"); $$ = "bool"; }
-    | Expr '+' Expr {printf("%s\n", "ADD"); $$ = $<s_val>1; }
-    | Expr '-' Expr {printf("%s\n", "SUB"); $$ = $<s_val>1; }
-    | Expr '*' Expr {printf("%s\n", "MUL"); $$ = $<s_val>1; }
-    | Expr '/' Expr {printf("%s\n", "DIV"); $$ = $<s_val>1; }
-    | Expr '%' Expr {printf("%s\n", "REM"); $$ = $<s_val>1; }
+    | Expr '+' Expr { 
+        if (strcmp($<s_val>1, "i32") == 0 && strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("iadd\n"); 
+        }
+        else if (strcmp($<s_val>1, "f32") == 0 && strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fadd\n");
+        } 
+        printf("%s\n", "ADD"); 
+        $$ = $<s_val>1; 
+      }
+    | Expr '-' Expr { 
+        if (strcmp($<s_val>1, "i32") == 0 && strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("isub\n");
+        }
+        else if (strcmp($<s_val>1, "f32") == 0 && strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fsub\n");
+        }
+        printf("%s\n", "SUB"); 
+        $$ = $<s_val>1; 
+      }
+    | Expr '*' Expr { 
+        if (strcmp($<s_val>1, "i32") == 0 && strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("imul\n");
+        }
+        else if (strcmp($<s_val>1, "f32") == 0 && strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fmul\n");
+        }
+        printf("%s\n", "MUL"); 
+        $$ = $<s_val>1; 
+      }
+    | Expr '/' Expr { 
+        if (strcmp($<s_val>1, "i32") == 0 && strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("idiv\n");
+        }
+        else if (strcmp($<s_val>1, "f32") == 0 && strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fdiv\n");
+        }
+        printf("%s\n", "DIV"); 
+        $$ = $<s_val>1; 
+      }
+    | Expr '%' Expr { CODEGEN("irem\n"); printf("%s\n", "REM"); $$ = $<s_val>1; }
     | '(' Expr ')' { $$ = $<s_val>2; }
-    | '-' Expr %prec UMINUS { printf("NEG\n"); $$ = $<s_val>2; }
-    | '!' Expr %prec NOT   { printf("NOT\n"); $$ = "bool"; }
+    | '-' Expr %prec UMINUS { 
+        if (strcmp($<s_val>2, "i32") == 0) {
+            CODEGEN("ineg\n");
+        } else if (strcmp($<s_val>2, "f32") == 0) {
+            CODEGEN("fneg\n");
+        } 
+        printf("NEG\n"); 
+        $$ = $<s_val>2; 
+      }
+    | '!' Expr %prec NOT   { 
+        // Not : use 1 - x ==> !x = 1 - x
+        CODEGEN("ldc 1\n");
+        CODEGEN("swap\n");
+        CODEGEN("isub\n");
+        printf("NOT\n"); 
+        $$ = "bool"; 
+      }
     | AssExpr '=' Expr { 
         if ($1.sym == NULL) {
             printf("error:%d: undefined: %s\n", yylineno + 1, $1.name);
@@ -238,12 +342,12 @@ Expr
     | AssExpr DIV_ASSIGN Expr { printf("DIV_ASSIGN\n"); $$ = $<s_val>1; }
     | AssExpr REM_ASSIGN Expr { printf("REM_ASSIGN\n"); $$ = $<s_val>1; }
     | Expr AS Type { printf("%c2%c\n", ($<s_val>1)[0], ($<s_val>3)[0]);  }
-    | INT_LIT { printf("INT_LIT %d\n", $<i_val>1); $$ = "i32"; }
-    | FLOAT_LIT { printf("FLOAT_LIT %f\n", $<f_val>1); $$ = "f32"; }
-    | '"' STRING_LIT '"' { printf("STRING_LIT \"%s\"\n", $<s_val>2); $$ = "str"; }
-    | '"' '"' { printf("STRING_LIT \"\"\n"); $$ = "str"; }
-    | TRUE { printf("bool TRUE\n"); $$ = "bool"; }
-    | FALSE { printf("bool FALSE\n"); $$ = "bool"; }
+    | INT_LIT { CODEGEN("ldc %d\n", $<i_val>1); printf("INT_LIT %d\n", $<i_val>1); $$ = "i32"; }
+    | FLOAT_LIT { CODEGEN("ldc %f\n", $<f_val>1); printf("FLOAT_LIT %f\n", $<f_val>1); $$ = "f32"; }
+    | '"' STRING_LIT '"' { CODEGEN("ldc \"%s\"\n", $<s_val>2); printf("STRING_LIT \"%s\"\n", $<s_val>2); $$ = "str"; }
+    | '"' '"' { CODEGEN("ldc \"\"\n"); printf("STRING_LIT \"\"\n"); $$ = "str"; }
+    | TRUE { CODEGEN("ldc 1\n"); printf("bool TRUE\n"); $$ = "bool"; }
+    | FALSE { CODEGEN("ldc 0\n"); printf("bool FALSE\n"); $$ = "bool"; }
     | '[' ExprList ']' { $$ = "array"; }
     | Expr '[' ExprList ']' { $$ = "array"; }
     | ID { 
@@ -254,6 +358,15 @@ Expr
             $$ = "undefined";
         } else {
             printf("IDENT (name=%s, address=%d)\n", $<s_val>1, sym->addr);
+            if (strcmp(sym->type, "i32") == 0) {
+                CODEGEN("iload %d\n", sym->addr);
+            } else if (strcmp(sym->type, "f32") == 0) {
+                CODEGEN("fload %d\n", sym->addr);
+            } else if (strcmp(sym->type, "str") == 0) {
+                CODEGEN("aload %d\n", sym->addr);
+            } else if (strcmp(sym->type, "bool") == 0) {
+                CODEGEN("iload %d\n", sym->addr);
+            }
             $$ = sym->type;
         }
      }
@@ -289,6 +402,9 @@ int main(int argc, char *argv[])
     CODEGEN(".source hw3.j\n");
     CODEGEN(".class public Main\n");
     CODEGEN(".super java/lang/Object\n");
+    CODEGEN(".method public static main([Ljava/lang/String;)V\n");
+    CODEGEN(".limit stack 100\n");
+    CODEGEN(".limit locals 100\n");
 
     /* Symbol table init */
     // Add your code
@@ -298,7 +414,8 @@ int main(int argc, char *argv[])
 
     /* Symbol table dump */
     // Add your code
-
+    CODEGEN("return\n");
+    CODEGEN(".end method\n");
 	printf("Total lines: %d\n", yylineno);
     fclose(fout);
     fclose(yyin);
