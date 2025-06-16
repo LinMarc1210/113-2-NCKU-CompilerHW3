@@ -7,15 +7,27 @@
     // #define YYDEBUG 1
     // int yydebug = 1;
 
+    typedef struct symbol_t {
+        int index;
+        char *name;
+        int mut;
+        char* type;
+        int addr;
+        int lineno;
+        char *func_sig;
+    } Symbol;
+
+    Symbol *symbol_table[1000][1000];    // max 1000 scopes, max 1000 symbols per scope.
+    int symbol_count[1000] = {0};        // number of symbols in each scope
+    int cur_scope = -1;               // current scope level
+    int cur_addr = -1;                // current address for symbol allocation
+
+
     extern int yylineno;
     extern int yylex();
     extern FILE *yyin;
 
     int yylex_destroy ();
-    void yyerror (char const *s)
-    {
-        printf("error:%d: %s\n", yylineno, s);
-    }
 
     extern int yylineno;
     extern int yylex();
@@ -35,14 +47,22 @@
     /* Symbol table function - you can add new functions if needed. */
     /* parameters and return type can be changed */
     static void create_symbol();
-    static void insert_symbol();
-    static void lookup_symbol();
-    static void dump_symbol();
+    static void insert_symbol(const char *name, int mul, const char *type, const char *func_sig);
+    static Symbol* lookup_symbol(const char *name);
+    static void dump_symbol(int stop_scope);
+    static void check_mismatch(const char* lhs, const char* opt, const char* rhs);
 
     /* Global variables */
     bool g_has_error = false;
     FILE *fout = NULL;
     int g_indent_cnt = 0;
+
+    bool HAS_ERROR = false;
+    void yyerror (char const *s)
+    {
+        HAS_ERROR = true;
+        printf("error:%d: %s\n", yylineno, s);
+    }
 %}
 
 %error-verbose
@@ -55,6 +75,15 @@
     int i_val;
     float f_val;
     char *s_val;
+    struct symbol_t *sym;
+    struct {
+        struct symbol_t *sym;
+        char *name;
+    } lval;
+    struct {
+        char *opname;
+        char *optype;
+    } opval;
     /* ... */
 }
 
@@ -73,9 +102,26 @@
 %token <i_val> INT_LIT
 %token <f_val> FLOAT_LIT
 %token <s_val> STRING_LIT
+%token <s_val> IDENT
+
+/* Operator Precedence (from lowest to highest) */
+%right '=' ADD_ASSIGN SUB_ASSIGN MUL_ASSIGN DIV_ASSIGN REM_ASSIGN
+%left LOR
+%left LAND
+%left '>' '<' GEQ LEQ EQL NEQ
+%left LSHIFT RSHIFT
+%left '+' '-'
+%left '*' '/' '%'
+%right UMINUS NOT
 
 /* Nonterminal with return, which need to sepcify type */
+%type <s_val> OptionalTypeDecl
+%type <s_val> OptionalInit
 %type <s_val> Type
+%type <s_val> TypeDecl
+%type <s_val> Expr
+%type <s_val> ExprList
+%type <lval> AssExpr
 
 /* Yacc will start at this nonterminal */
 %start Program
@@ -84,7 +130,7 @@
 %%
 
 Program
-    : GlobalStatementList
+    : { create_symbol(); } GlobalStatementList
 ;
 
 GlobalStatementList 
@@ -98,9 +144,130 @@ GlobalStatement
 ;
 
 FunctionDeclStmt
-    :
+    : FUNC ID { printf("func: %s\n", $<s_val>2); insert_symbol($<s_val>2, -1, "func", "(V)V"); } '(' ')' '{' { create_symbol(); } StatementList '}' { dump_symbol(0);}
 ;
 
+StatementList
+    : StatementList Statement
+    | Statement
+;
+
+Statement
+    : LET TypeDecl
+    | FuncCall
+    | '{' {create_symbol();} StatementList '}' { dump_symbol(cur_scope); }
+    | ExprList ';'
+    | IF Expr '{' { create_symbol(); } StatementList '}' { dump_symbol(cur_scope); } ElseStatement
+    | WHILE Expr '{' { create_symbol(); } StatementList '}' { dump_symbol(cur_scope); }
+;
+
+ElseStatement
+    : ELSE '{' { create_symbol(); } StatementList '}' { dump_symbol(cur_scope); }
+    | {;}
+;
+
+TypeDecl
+    : ID OptionalTypeDecl OptionalInit ';' { insert_symbol($<s_val>1, 0, $<s_val>2 ? $<s_val>2 : $<s_val>3, "-"); }
+    | MUT ID OptionalTypeDecl OptionalInit ';' { insert_symbol($<s_val>2, 1, $<s_val>3 ? $<s_val>3 : $<s_val>4, "-"); }
+;
+
+OptionalTypeDecl
+    : ':' Type  { $$ = $<s_val>2; }
+    | ':' '&' Type  { $$ = $<s_val>3; }
+    | ':' '[' Type ';' Expr ']' { $$ = "array"; } 
+    | {$$ = NULL;}
+;
+
+OptionalInit
+    : '=' Expr { $$ = $<s_val>2; }
+    | {$$ = NULL;}
+;
+
+Type
+    : INT { $$ = "i32"; }
+    | FLOAT { $$ = "f32"; }
+    | BOOL { $$ = "bool"; }
+    | STR { $$ = "str"; }
+;
+
+FuncCall
+    : PRINT '(' ExprList ')' ';' { printf("PRINT %s\n", $<s_val>3); } 
+    | PRINTLN '(' ExprList ')' ';' { printf("PRINTLN %s\n", $<s_val>3); }
+;
+
+ExprList
+    : Expr ',' ExprList
+    | Expr
+;
+
+Expr
+    : Expr LOR Expr {printf("%s\n", "LOR"); $$ = "bool";}
+    | Expr LAND Expr {printf("%s\n", "LAND"); $$ = "bool";}
+    | Expr '>' Expr {check_mismatch($<s_val>1, "GTR", $<s_val>3); printf("%s\n", "GTR"); $$ = "bool"; }
+    | Expr '<' Expr {check_mismatch($<s_val>1, "LSS", $<s_val>3); printf("%s\n", "LSS"); $$ = "bool"; }
+    | Expr GEQ Expr {check_mismatch($<s_val>1, "GEQ", $<s_val>3); printf("%s\n", "GEQ"); $$ = "bool"; }
+    | Expr LEQ Expr {check_mismatch($<s_val>1, "LEQ", $<s_val>3); printf("%s\n", "LEQ"); $$ = "bool"; }
+    | Expr EQL Expr {check_mismatch($<s_val>1, "EQL", $<s_val>3); printf("%s\n", "EQL"); $$ = "bool"; }
+    | Expr NEQ Expr {check_mismatch($<s_val>1, "NEQ", $<s_val>3); printf("%s\n", "NEQ"); $$ = "bool"; }
+    | Expr LSHIFT Expr {check_mismatch($<s_val>1, "LSHIFT", $<s_val>3); printf("%s\n", "LSHIFT"); $$ = "bool"; }
+    | Expr RSHIFT Expr {check_mismatch($<s_val>1, "RSHIFT", $<s_val>3); printf("%s\n", "RSHIFT"); $$ = "bool"; }
+    | Expr '+' Expr {printf("%s\n", "ADD"); $$ = $<s_val>1; }
+    | Expr '-' Expr {printf("%s\n", "SUB"); $$ = $<s_val>1; }
+    | Expr '*' Expr {printf("%s\n", "MUL"); $$ = $<s_val>1; }
+    | Expr '/' Expr {printf("%s\n", "DIV"); $$ = $<s_val>1; }
+    | Expr '%' Expr {printf("%s\n", "REM"); $$ = $<s_val>1; }
+    | '(' Expr ')' { $$ = $<s_val>2; }
+    | '-' Expr %prec UMINUS { printf("NEG\n"); $$ = $<s_val>2; }
+    | '!' Expr %prec NOT   { printf("NOT\n"); $$ = "bool"; }
+    | AssExpr '=' Expr { 
+        if ($1.sym == NULL) {
+            printf("error:%d: undefined: %s\n", yylineno + 1, $1.name);
+        } else if ($1.sym->mut == 0) {
+            printf("ASSIGN\n");
+            printf("error:%d: cannot borrow immutable borrowed content `%s` as mutable\n", yylineno + 1, $1.name);
+            HAS_ERROR = true;
+        }
+        else {
+            printf("ASSIGN\n");
+        }
+        $$ = $<s_val>3;
+      }
+    | AssExpr ADD_ASSIGN Expr { printf("ADD_ASSIGN\n"); $$ = $<s_val>1; }
+    | AssExpr SUB_ASSIGN Expr { printf("SUB_ASSIGN\n"); $$ = $<s_val>1; }
+    | AssExpr MUL_ASSIGN Expr { printf("MUL_ASSIGN\n"); $$ = $<s_val>1; }
+    | AssExpr DIV_ASSIGN Expr { printf("DIV_ASSIGN\n"); $$ = $<s_val>1; }
+    | AssExpr REM_ASSIGN Expr { printf("REM_ASSIGN\n"); $$ = $<s_val>1; }
+    | Expr AS Type { printf("%c2%c\n", ($<s_val>1)[0], ($<s_val>3)[0]);  }
+    | INT_LIT { printf("INT_LIT %d\n", $<i_val>1); $$ = "i32"; }
+    | FLOAT_LIT { printf("FLOAT_LIT %f\n", $<f_val>1); $$ = "f32"; }
+    | '"' STRING_LIT '"' { printf("STRING_LIT \"%s\"\n", $<s_val>2); $$ = "str"; }
+    | '"' '"' { printf("STRING_LIT \"\"\n"); $$ = "str"; }
+    | TRUE { printf("bool TRUE\n"); $$ = "bool"; }
+    | FALSE { printf("bool FALSE\n"); $$ = "bool"; }
+    | '[' ExprList ']' { $$ = "array"; }
+    | Expr '[' ExprList ']' { $$ = "array"; }
+    | ID { 
+        Symbol* sym = lookup_symbol($<s_val>1);
+        if (!sym) {
+            printf("error:%d: undefined: %s\n", yylineno + 1, $<s_val>1);
+            HAS_ERROR = true;
+            $$ = "undefined";
+        } else {
+            printf("IDENT (name=%s, address=%d)\n", $<s_val>1, sym->addr);
+            $$ = sym->type;
+        }
+     }
+;
+
+AssExpr
+    : ID {
+        Symbol *sym = lookup_symbol($<s_val>1);
+        $$.sym = sym;
+        $$.name = $<s_val>1;
+        if (!sym) {
+            HAS_ERROR = true;
+        }
+    }
 %%
 
 /* C code section */
@@ -144,20 +311,64 @@ int main(int argc, char *argv[])
 }
 
 static void create_symbol() {
-    printf("> Create symbol table (scope level %d)\n", 0);
+    cur_scope++;
+    symbol_count[cur_scope] = 0;
+    Symbol *new_symbol;
+    for (int i = 0; i < 1000; i++) {
+        new_symbol = (Symbol *)malloc(sizeof(Symbol));
+        symbol_table[cur_scope][i] = new_symbol;
+    }
+    printf("> Create symbol table (scope level %d)\n", cur_scope);
 }
 
-static void insert_symbol() {
-    printf("> Insert `%s` (addr: %d) to scope level %d\n", "XXX", 0, 0);
+static void insert_symbol(const char *name, int mul, const char *type, const char *func_sig) {
+    // Set address and index
+    printf("> Insert `%s` (addr: %d) to scope level %d\n", name, cur_addr, cur_scope);
+    symbol_table[cur_scope][symbol_count[cur_scope]]->index = symbol_count[cur_scope];
+    symbol_table[cur_scope][symbol_count[cur_scope]]->name = strdup(name);
+    symbol_table[cur_scope][symbol_count[cur_scope]]->mut = mul;
+    symbol_table[cur_scope][symbol_count[cur_scope]]->type = strdup(type);
+    symbol_table[cur_scope][symbol_count[cur_scope]]->addr = cur_addr;
+    symbol_table[cur_scope][symbol_count[cur_scope]]->lineno = yylineno + 1;    // because yylineno has not increased yet
+    symbol_table[cur_scope][symbol_count[cur_scope]]->func_sig = strdup(func_sig);
+    symbol_count[cur_scope]++;
+    cur_addr++;
 }
 
-static void lookup_symbol() {
+static Symbol* lookup_symbol(const char *name) {
+    for (int i = cur_scope; i >= 0; i--) {
+        for (int j = 0; j < symbol_count[i]; j++) {
+            if (strcmp(symbol_table[i][j]->name, name) == 0) {
+                return symbol_table[i][j];
+            }
+        }
+    }
+    return NULL;
 }
 
-static void dump_symbol() {
-    printf("\n> Dump symbol table (scope level: %d)\n", 0);
-    printf("%-10s%-10s%-10s%-10s%-10s%-10s%-10s\n",
-        "Index", "Name", "Mut","Type", "Addr", "Lineno", "Func_sig");
-    printf("%-10d%-10s%-10d%-10s%-10d%-10d%-10s\n",
-            0, "name", 0, "type", 0, 0, "func_sig");
+static void dump_symbol(int stop_scope) {
+    while (cur_scope >= stop_scope) {
+        printf("\n> Dump symbol table (scope level: %d)\n", cur_scope);
+        printf("%-10s%-10s%-10s%-10s%-10s%-10s%-10s\n",
+               "Index", "Name", "Mut","Type", "Addr", "Lineno", "Func_sig");
+               
+        for (int i = 0; i < symbol_count[cur_scope]; i++) {
+            printf("%-10d%-10s%-10d%-10s%-10d%-10d%-10s\n",
+                   i, 
+                   symbol_table[cur_scope][i]->name,
+                   symbol_table[cur_scope][i]->mut,
+                   symbol_table[cur_scope][i]->type,
+                   symbol_table[cur_scope][i]->addr,
+                   symbol_table[cur_scope][i]->lineno,
+                   symbol_table[cur_scope][i]->func_sig);
+        }
+        cur_scope--;
+    }
+}
+
+static void check_mismatch(const char* lhs, const char* opt, const char* rhs) {
+    if (strcmp(lhs, rhs) != 0 ) {
+        printf("error:%d: invalid operation: %s (mismatched types %s and %s)\n", yylineno + 1, opt, lhs, rhs);
+        HAS_ERROR = true;
+    }
 }
