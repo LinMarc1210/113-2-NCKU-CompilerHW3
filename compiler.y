@@ -57,6 +57,7 @@
     FILE *fout = NULL;
     int g_indent_cnt = 0;
     int g_lbl_counter = 0;    // avoid if-else label conflict
+    int g_while_counter = 0;
 
     bool HAS_ERROR = false;
     void yyerror (char const *s)
@@ -158,18 +159,77 @@ Statement
     | FuncCall
     | '{' {create_symbol();} StatementList '}' { dump_symbol(cur_scope); }
     | ExprList ';'
-    | IF Expr '{' { create_symbol(); } StatementList '}' { dump_symbol(cur_scope); } ElseStatement
-    | WHILE Expr '{' { create_symbol(); } StatementList '}' { dump_symbol(cur_scope); }
+    | IF Expr '{' { create_symbol(); CODEGEN("ifeq If_false_%d\n", g_lbl_counter); } StatementList '}' { dump_symbol(cur_scope); } ElseStatement 
+    | WHILE { g_indent_cnt--; CODEGEN("While_%d:\n", g_while_counter); g_indent_cnt++; } Expr '{' { 
+        create_symbol(); 
+        CODEGEN("ifeq While_end_%d\n", g_while_counter);
+      } StatementList '}' { 
+        dump_symbol(cur_scope); 
+        CODEGEN("goto While_%d\n", g_while_counter);
+        g_indent_cnt--; CODEGEN("While_end_%d:\n", g_while_counter); g_indent_cnt++; 
+        g_while_counter++;
+      }
 ;
 
 ElseStatement
-    : ELSE '{' { create_symbol(); } StatementList '}' { dump_symbol(cur_scope); }
-    | {;}
-;
+    : ELSE '{' { create_symbol(); g_indent_cnt--; CODEGEN("If_false_%d:\n", g_lbl_counter); g_indent_cnt++; g_lbl_counter++; } StatementList '}' { dump_symbol(cur_scope); }
+    | { g_indent_cnt--; CODEGEN("If_false_%d:\n", g_lbl_counter); g_indent_cnt++; g_lbl_counter++;}
 
 TypeDecl
-    : ID OptionalTypeDecl OptionalInit ';' { insert_symbol($<s_val>1, 0, $<s_val>2 ? $<s_val>2 : $<s_val>3, "-"); }
-    | MUT ID OptionalTypeDecl OptionalInit ';' { insert_symbol($<s_val>2, 1, $<s_val>3 ? $<s_val>3 : $<s_val>4, "-"); }
+    : ID OptionalTypeDecl OptionalInit ';' { 
+        char* t = $<s_val>2 ? $<s_val>2 : $<s_val>3;
+        insert_symbol($<s_val>1, 0, $<s_val>2 ? $<s_val>2 : $<s_val>3, "-"); 
+        Symbol *sym = lookup_symbol($<s_val>1);
+
+        if ($<s_val>3 == NULL) {    // no initialize value
+            if (strcmp(t, "f32") == 0) {
+                CODEGEN("fconst_0\n");
+            }
+            else if (strcmp(t, "str") == 0) {
+                CODEGEN("ldc \"\"\n");
+            }
+            else {  /* i32 / bool */
+                CODEGEN("iconst_0\n");
+            }
+        }
+        // store to variable
+        if (strcmp(t, "f32") == 0) {
+            CODEGEN("fstore %d\n", sym->addr);
+        }
+        else if (strcmp(t, "str") == 0) {
+            CODEGEN("astore %d\n", sym->addr);
+        }
+        else {  /* i32 / bool */
+            CODEGEN("istore %d\n", sym->addr);
+        }
+    }
+    | MUT ID OptionalTypeDecl OptionalInit ';' { 
+        char* t = $<s_val>3 ? $<s_val>3 : $<s_val>4;
+        insert_symbol($<s_val>2, 1, $<s_val>3 ? $<s_val>3 : $<s_val>4, "-"); 
+        Symbol *sym = lookup_symbol($<s_val>2);
+
+        if ($<s_val>4 == NULL) {    // no initialize value
+            if (strcmp(t, "f32") == 0) {
+                CODEGEN("fconst_0\n");
+            }
+            else if (strcmp(t, "str") == 0) {
+                CODEGEN("ldc \"\"\n");
+            }
+            else {  /* i32 / bool */
+                CODEGEN("iconst_0\n");
+            }
+        }
+        // store to variable
+        if (strcmp(t, "f32") == 0) {
+            CODEGEN("fstore %d\n", sym->addr);
+        }
+        else if (strcmp(t, "str") == 0) {
+            CODEGEN("astore %d\n", sym->addr);
+        }
+        else {  /* i32 / bool */
+            CODEGEN("istore %d\n", sym->addr);
+        }
+    }
 ;
 
 OptionalTypeDecl
@@ -180,18 +240,7 @@ OptionalTypeDecl
 ;
 
 OptionalInit
-    : '=' Expr { 
-        if (strcmp($<s_val>2, "i32") == 0) {
-            CODEGEN("istore %d\n", cur_addr);
-        } else if (strcmp($<s_val>2, "f32") == 0) {
-            CODEGEN("fstore %d\n", cur_addr);
-        } else if (strcmp($<s_val>2, "str") == 0) {
-            CODEGEN("astore %d\n", cur_addr);
-        } else if (strcmp($<s_val>2, "bool") == 0) {
-            CODEGEN("istore %d\n", cur_addr);
-        }
-        $$ = $<s_val>2; 
-    }
+    : '=' Expr { $$ = $<s_val>2; }
     | {$$ = NULL;}
 ;
 
@@ -249,19 +298,74 @@ Expr
             CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
             CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
         }
-        CODEGEN("Comp_true_%d:\n", g_lbl_counter);
+        g_indent_cnt--; CODEGEN("Comp_true_%d:\n", g_lbl_counter); g_indent_cnt++;
         CODEGEN("iconst_1\n");     // if true push 1 (iconst_1 == ldc 1)
-        CODEGEN("Comp_end_%d:\n", g_lbl_counter);
+        g_indent_cnt--; CODEGEN("Comp_end_%d:\n", g_lbl_counter); g_indent_cnt++;
         g_lbl_counter++;
         // The above code is for comparison, if true then push 1, else push 0
         printf("%s\n", "GTR"); 
         $$ = "bool"; 
     }
-    | Expr '<' Expr {check_mismatch($<s_val>1, "LSS", $<s_val>3); printf("%s\n", "LSS"); $$ = "bool"; }
+    | Expr '<' Expr {
+        check_mismatch($<s_val>1, "LSS", $<s_val>3); 
+        if (strcmp($<s_val>1, "i32") == 0 && strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("if_icmplt Comp_true_%d\n", g_lbl_counter);
+            CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
+            CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
+        } else if (strcmp($<s_val>1, "f32") == 0 && strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fcmpg\n");
+            CODEGEN("iflt Comp_true_%d\n", g_lbl_counter);
+            CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
+            CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
+        }
+        g_indent_cnt--; CODEGEN("Comp_true_%d:\n", g_lbl_counter); g_indent_cnt++;
+        CODEGEN("iconst_1\n");     // if true push 1 (iconst_1 == ldc 1)
+        g_indent_cnt--; CODEGEN("Comp_end_%d:\n", g_lbl_counter); g_indent_cnt++;
+        g_lbl_counter++;
+        // The above code is for comparison, if true then push 1, else push 0
+        printf("%s\n", "LSS"); 
+        $$ = "bool"; 
+      }
     | Expr GEQ Expr {check_mismatch($<s_val>1, "GEQ", $<s_val>3); printf("%s\n", "GEQ"); $$ = "bool"; }
     | Expr LEQ Expr {check_mismatch($<s_val>1, "LEQ", $<s_val>3); printf("%s\n", "LEQ"); $$ = "bool"; }
-    | Expr EQL Expr {check_mismatch($<s_val>1, "EQL", $<s_val>3); printf("%s\n", "EQL"); $$ = "bool"; }
-    | Expr NEQ Expr {check_mismatch($<s_val>1, "NEQ", $<s_val>3); printf("%s\n", "NEQ"); $$ = "bool"; }
+    | Expr EQL Expr {
+        check_mismatch($<s_val>1, "EQL", $<s_val>3); 
+        if (strcmp($<s_val>1, "i32") == 0 && strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("if_icmpeq Comp_true_%d\n", g_lbl_counter);
+            CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
+            CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
+        } else if (strcmp($<s_val>1, "f32") == 0 && strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fcmpg\n");
+            CODEGEN("ifeq Comp_true_%d\n", g_lbl_counter);
+            CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
+            CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
+        }
+        g_indent_cnt--; CODEGEN("Comp_true_%d:\n", g_lbl_counter); g_indent_cnt++;
+        CODEGEN("iconst_1\n");     // if true push 1 (iconst_1 == ldc 1)
+        g_indent_cnt--; CODEGEN("Comp_end_%d:\n", g_lbl_counter); g_indent_cnt++;
+        g_lbl_counter++;
+        printf("%s\n", "EQL"); 
+        $$ = "bool"; 
+      }
+    | Expr NEQ Expr {
+        check_mismatch($<s_val>1, "NEQ", $<s_val>3); 
+        if (strcmp($<s_val>1, "i32") == 0 && strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("if_icmpne Comp_true_%d\n", g_lbl_counter);
+            CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
+            CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
+        } else if (strcmp($<s_val>1, "f32") == 0 && strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fcmpg\n");
+            CODEGEN("ifne Comp_true_%d\n", g_lbl_counter);
+            CODEGEN("iconst_0\n");     // if false push 0 (iconst_0 == ldc 0)
+            CODEGEN("goto Comp_end_%d\n", g_lbl_counter);
+        }
+        g_indent_cnt--; CODEGEN("Comp_true_%d:\n", g_lbl_counter); g_indent_cnt++;
+        CODEGEN("iconst_1\n");     // if true push 1 (iconst_1 == ldc 1)
+        g_indent_cnt--; CODEGEN("Comp_end_%d:\n", g_lbl_counter); g_indent_cnt++;
+        g_lbl_counter++;
+        printf("%s\n", "NEQ"); 
+        $$ = "bool"; 
+      }
     | Expr LSHIFT Expr {check_mismatch($<s_val>1, "LSHIFT", $<s_val>3); printf("%s\n", "LSHIFT"); $$ = "bool"; }
     | Expr RSHIFT Expr {check_mismatch($<s_val>1, "RSHIFT", $<s_val>3); printf("%s\n", "RSHIFT"); $$ = "bool"; }
     | Expr '+' Expr { 
@@ -332,18 +436,86 @@ Expr
             HAS_ERROR = true;
         }
         else {
+            if (strcmp($<s_val>3, "i32") == 0) {
+                CODEGEN("istore %d\n", $1.sym->addr);
+            } else if (strcmp($<s_val>3, "f32") == 0) {
+                CODEGEN("fstore %d\n", $1.sym->addr);
+            } else if (strcmp($<s_val>3, "str") == 0) {
+                CODEGEN("astore %d\n", $1.sym->addr);
+            } else if (strcmp($<s_val>3, "bool") == 0) {
+                CODEGEN("istore %d\n", $1.sym->addr);
+            }
             printf("ASSIGN\n");
         }
         $$ = $<s_val>3;
       }
-    | AssExpr ADD_ASSIGN Expr { printf("ADD_ASSIGN\n"); $$ = $<s_val>1; }
-    | AssExpr SUB_ASSIGN Expr { printf("SUB_ASSIGN\n"); $$ = $<s_val>1; }
-    | AssExpr MUL_ASSIGN Expr { printf("MUL_ASSIGN\n"); $$ = $<s_val>1; }
-    | AssExpr DIV_ASSIGN Expr { printf("DIV_ASSIGN\n"); $$ = $<s_val>1; }
-    | AssExpr REM_ASSIGN Expr { printf("REM_ASSIGN\n"); $$ = $<s_val>1; }
-    | Expr AS Type { printf("%c2%c\n", ($<s_val>1)[0], ($<s_val>3)[0]);  }
-    | INT_LIT { CODEGEN("ldc %d\n", $<i_val>1); printf("INT_LIT %d\n", $<i_val>1); $$ = "i32"; }
-    | FLOAT_LIT { CODEGEN("ldc %f\n", $<f_val>1); printf("FLOAT_LIT %f\n", $<f_val>1); $$ = "f32"; }
+    | AssExpr ADD_ASSIGN Expr { 
+        if (strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("iadd\n");
+            CODEGEN("istore %d\n", $1.sym->addr);
+        } else if (strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fadd\n");
+            CODEGEN("fstore %d\n", $1.sym->addr);
+        } 
+        printf("ADD_ASSIGN\n"); 
+        $$ = $<s_val>1; 
+      }
+    | AssExpr SUB_ASSIGN Expr { 
+        if (strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("isub\n");
+            CODEGEN("istore %d\n", $1.sym->addr);
+        } else if (strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fsub\n");
+            CODEGEN("fstore %d\n", $1.sym->addr);
+        } 
+        printf("SUB_ASSIGN\n"); 
+        $$ = $<s_val>1; 
+      }
+    | AssExpr MUL_ASSIGN Expr { 
+        if (strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("imul\n");
+            CODEGEN("istore %d\n", $1.sym->addr);
+        } else if (strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fmul\n");
+            CODEGEN("fstore %d\n", $1.sym->addr);
+        } 
+        printf("MUL_ASSIGN\n"); 
+        $$ = $<s_val>1; 
+      }
+    | AssExpr DIV_ASSIGN Expr {
+        if (strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("idiv\n");
+            CODEGEN("istore %d\n", $1.sym->addr);
+        } else if (strcmp($<s_val>3, "f32") == 0) {
+            CODEGEN("fdiv\n");
+            CODEGEN("fstore %d\n", $1.sym->addr);
+        } 
+        printf("DIV_ASSIGN\n"); 
+        $$ = $<s_val>1;
+      } 
+    | AssExpr REM_ASSIGN Expr { 
+        if (strcmp($<s_val>3, "i32") == 0) {
+            CODEGEN("irem\n");
+            CODEGEN("istore %d\n", $1.sym->addr);
+        } 
+        printf("REM_ASSIGN\n"); 
+        $$ = $<s_val>1; 
+      }
+    | Expr AS Type { 
+        CODEGEN("%c2%c\n", ($<s_val>1)[0], ($<s_val>3)[0]);
+        printf("%c2%c\n", ($<s_val>1)[0], ($<s_val>3)[0]);
+        $$ = $<s_val>3;
+      }
+    | INT_LIT { 
+        CODEGEN("ldc %d\n", $<i_val>1); 
+        printf("INT_LIT %d\n", $<i_val>1); 
+        $$ = "i32"; 
+      }
+    | FLOAT_LIT { 
+        CODEGEN("ldc %f\n", $<f_val>1); 
+        printf("FLOAT_LIT %f\n", $<f_val>1); 
+        $$ = "f32"; 
+      }
     | '"' STRING_LIT '"' { CODEGEN("ldc \"%s\"\n", $<s_val>2); printf("STRING_LIT \"%s\"\n", $<s_val>2); $$ = "str"; }
     | '"' '"' { CODEGEN("ldc \"\"\n"); printf("STRING_LIT \"\"\n"); $$ = "str"; }
     | TRUE { CODEGEN("ldc 1\n"); printf("bool TRUE\n"); $$ = "bool"; }
@@ -379,6 +551,17 @@ AssExpr
         $$.name = $<s_val>1;
         if (!sym) {
             HAS_ERROR = true;
+        }
+        else {
+            if (strcmp(sym->type, "i32") == 0) {
+                CODEGEN("iload %d\n", sym->addr);
+            } else if (strcmp(sym->type, "f32") == 0) {
+                CODEGEN("fload %d\n", sym->addr);
+            } else if (strcmp(sym->type, "str") == 0) {
+                CODEGEN("aload %d\n", sym->addr);
+            } else if (strcmp(sym->type, "bool") == 0) {
+                CODEGEN("iload %d\n", sym->addr);
+            }
         }
     }
 %%
